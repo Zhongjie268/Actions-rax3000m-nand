@@ -11,7 +11,6 @@
 name: Build ImmortalWrt-mt798x
 
 permissions: write-all
-# 开启写权限，防止无法上传到release
 
 on:
   workflow_dispatch:
@@ -89,7 +88,7 @@ jobs:
       uses: klever1988/cachewrtbuild@main
       with:
         ccache: 'true'
-        mixkey: 'openwrt21-cortexa53'
+        mixkey: 'openwrt21-cortexa53-v2'
         prefix: ${{ github.workspace }}/openwrt
 
     - name: 更新 & 安装 feeds & 执行脚本
@@ -101,26 +100,23 @@ jobs:
         sed -i '$a src-git kenzok8 https://github.com/kenzok8/openwrt-packages' feeds.conf.default
         ./scripts/feeds update -a && ./scripts/feeds install -a
 
-        # 替换 Go 版本，解决 v2ray-geodata 编译失败
+        # 安装 golang 使用 kenzok8 源（指定稳定分支）
         rm -rf feeds/packages/lang/golang
-        git clone https://github.com/kenzok8/golang feeds/packages/lang/golang
+        git clone -b 1.23 https://github.com/kenzok8/golang feeds/packages/lang/golang
 
-        # 替换 PassWall2 为官方源
-        rm -rf feeds/luci/applications/luci-app-passwall2/
-        rm -rf feeds/packages/net/xray-core/
-        rm -rf feeds/packages/net/xray-plugin/
-        git clone https://github.com/openwrt-passwall/openwrt-passwall2 package/luci-app-passwall2
-        git clone https://github.com/openwrt-passwall/openwrt-passwall-packages package/luci-app-passwall2-packages
+        # 清理 feeds 里可能冲突的 passwall2
+        rm -rf feeds/luci/applications/luci-app-passwall2
+        rm -rf feeds/smpackage/luci-app-passwall2
+        rm -rf feeds/kenzok8/luci-app-passwall2
 
-        # 再次安装，不加 -f，避免覆盖手动 clone 的 PassWall2
-        ./scripts/feeds install -a
-        
         chmod +x $GITHUB_WORKSPACE/$DIY_SH && $GITHUB_WORKSPACE/$DIY_SH
 
     - name: 导入补丁和配置
       run: |
         [ -e files ] && mv files openwrt/files
         cat configs/rax3000m-emmc_mtksdk.config >> openwrt/.config
+        # 强制关闭 v2ray-geodata，避免下载失败中断编译
+        sed -i 's/CONFIG_PACKAGE_v2ray-geodata=y/# CONFIG_PACKAGE_v2ray-geodata is not set/' openwrt/.config
 
     - name: 设置无线控制界面样式
       if: env.USE_MTWIFI_CFG == 'true'
@@ -133,6 +129,8 @@ jobs:
         rm -rf tmp
         # chmod +x $GITHUB_WORKSPACE/$CLASH_CORE && $GITHUB_WORKSPACE/$CLASH_CORE
         make defconfig
+        # defconfig 后可能又被 select 回来，再关一次
+        sed -i 's/CONFIG_PACKAGE_v2ray-geodata=y/# CONFIG_PACKAGE_v2ray-geodata is not set/' .config
         make download -j8 V=10
         find dl -size -1024c -exec ls -l {} \;
         find dl -size -1024c -exec rm -f {} \;
@@ -142,8 +140,18 @@ jobs:
       run: |
         cd openwrt
         echo -e "$(($(nproc)+1)) thread compile"
-        make -j$(($(nproc)+1)) || make -j$(nproc) || make -j1 V=s
+        set -o pipefail
+        (make -j$(($(nproc)+1)) 2>&1 | tee /tmp/build.log) \
+          || (make -j$(nproc) 2>&1 | tee /tmp/build.log) \
+          || (make -j1 V=s 2>&1 | tee /tmp/build.log)
         echo "status=success" >> $GITHUB_OUTPUT
+
+    - name: 上传编译日志
+      if: always()
+      uses: actions/upload-artifact@main
+      with:
+        name: build-log
+        path: /tmp/build.log
 
     - name: 空间使用情况
       if: (!cancelled())
@@ -161,9 +169,9 @@ jobs:
       if: steps.compile.outputs.status == 'success'
       run: |
         cd openwrt/bin/targets/*/*
-        rm -rf *.buildinfo 
-        rm -rf *.json 
-        rm -rf *.manifest 
+        rm -rf *.buildinfo
+        rm -rf *.json
+        rm -rf *.manifest
         rm -rf packages
         echo "FIRMWARE=$PWD" >> $GITHUB_ENV
         echo "status=success" >> $GITHUB_OUTPUT
@@ -191,7 +199,7 @@ jobs:
         eeprom_status=""
         echo "- eeprom 使用 H3C NX30 Pro 提取版本" >> release.txt
         eeprom_status="nx30pro_eeprom"
-        release_tag=$(date +"%Y.%m.%d-mt7981-cmcc_rax3000m-nand-${wlan_luci_interface}-${eeprom_status}")
+        release_tag=$(date +"%Y.%m.%d-%H%M-mt7981-cmcc_rax3000m-nand-${wlan_luci_interface}-${eeprom_status}")
         echo "release_tag=${release_tag}" >> $GITHUB_OUTPUT
         echo "status=success" >> $GITHUB_OUTPUT
 
